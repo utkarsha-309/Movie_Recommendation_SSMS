@@ -1,0 +1,339 @@
+CREATE DATABASE MovieRecDB;
+GO
+
+USE MovieRecDB;
+GO
+
+CREATE TABLE Genres (GenreID INT IDENTITY(1,1) PRIMARY KEY,
+    Name NVARCHAR(100) NOT NULL UNIQUE
+);
+GO
+INSERT INTO Genres (Name) VALUES
+('Action'),('Drama'),('Comedy'),('Horror'),('Romance'),
+('Documentary'),('Sci-Fi'),('Thriller'),('Animation'),('Family');
+GO
+
+
+CREATE TABLE Languages (LanguageID INT IDENTITY(1,1) PRIMARY KEY,
+    Name NVARCHAR(100) NOT NULL UNIQUE
+);
+GO
+INSERT INTO Languages (Name) VALUES
+('English'),('Hindi'),('Spanish'),('French'),('Mandarin'),
+('German'),('Japanese'),('Korean'),('Portuguese'),('Arabic');
+GO
+
+
+CREATE TABLE Regions (RegionID INT IDENTITY(1,1) PRIMARY KEY,
+    Name NVARCHAR(100) NOT NULL UNIQUE
+);
+GO
+INSERT INTO Regions (Name) VALUES
+('North America'),('Europe'),('Asia'),('South America'),('Africa'),('Oceania');
+GO
+
+
+CREATE TABLE Countries (CountryID INT IDENTITY(1,1) PRIMARY KEY,
+    Name NVARCHAR(100) NOT NULL UNIQUE
+);
+GO
+INSERT INTO Countries (Name) VALUES
+('United States'),('India'),('United Kingdom'),('Canada'),('Australia'),
+('France'),('Germany'),('China'),('Japan'),('South Korea'),
+('Brazil'),('Spain'),('Mexico'),('South Africa'),('Italy');
+GO
+
+CREATE TABLE Movies (
+    MovieID INT IDENTITY(1,1) PRIMARY KEY,
+    Title NVARCHAR(250) NOT NULL,
+    GenreID INT NOT NULL,
+    LanguageID INT NOT NULL,
+    RegionID INT NOT NULL,
+    CountryID INT NOT NULL,
+    ReleaseDate DATE NOT NULL,
+    ReleaseYear AS YEAR(ReleaseDate) PERSISTED,
+    DurationMin INT NULL,
+    Description NVARCHAR(2000) NULL,
+    CreatedAt DATETIME2 DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT FK_Movies_Genres FOREIGN KEY (GenreID) REFERENCES Genres(GenreID),
+    CONSTRAINT FK_Movies_Languages FOREIGN KEY (LanguageID) REFERENCES Languages(LanguageID),
+    CONSTRAINT FK_Movies_Regions FOREIGN KEY (RegionID) REFERENCES Regions(RegionID),
+    CONSTRAINT FK_Movies_Countries FOREIGN KEY (CountryID) REFERENCES Countries(CountryID)
+);
+GO
+
+CREATE TABLE Users (
+    UserID INT IDENTITY(1,1) PRIMARY KEY,
+    Username NVARCHAR(100) NOT NULL UNIQUE,
+    Email NVARCHAR(200) NOT NULL UNIQUE,
+    PasswordHash NVARCHAR(200) NOT NULL, 
+    DisplayName NVARCHAR(150),
+    SignUpDate DATETIME2 DEFAULT SYSUTCDATETIME(),
+    IsActive BIT DEFAULT 1
+);
+GO
+
+CREATE TABLE Ratings (
+    RatingID BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserID INT NOT NULL,
+    MovieID INT NOT NULL,
+    Rating TINYINT NOT NULL CHECK (Rating BETWEEN 1 AND 10),
+    Review NVARCHAR(2000) NULL,
+    RatedAt DATETIME2 DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT FK_Ratings_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
+    CONSTRAINT FK_Ratings_Movies FOREIGN KEY (MovieID) REFERENCES Movies(MovieID),
+    CONSTRAINT UQ_User_Movie UNIQUE (UserID, MovieID)
+);
+GO
+
+CREATE TABLE SiteVisitors (
+    VisitID BIGINT IDENTITY(1,1) PRIMARY KEY,
+    VisitorIdentifier NVARCHAR(200) NULL, -- cookie/session id
+    UserID INT NULL,                       -- null if anonymous
+    VisitTime DATETIME2 DEFAULT SYSUTCDATETIME(),
+    PageVisited NVARCHAR(500) NULL,
+    Country NVARCHAR(100) NULL,
+    Region NVARCHAR(100) NULL
+);
+GO
+
+DELETE FROM Ratings;  -- delete dependent rows first
+DELETE FROM Movies;   -- now you can delete movies
+
+DBCC CHECKIDENT ('Movies', RESEED, 0);
+DBCC CHECKIDENT ('Ratings', RESEED, 0);
+
+
+CREATE INDEX IX_Ratings_MovieID ON Ratings(MovieID);
+CREATE INDEX IX_Ratings_UserID ON Ratings(UserID);
+CREATE INDEX IX_Movies_ReleaseDate ON Movies(ReleaseDate);
+CREATE INDEX IX_SiteVisitors_UserID ON SiteVisitors(UserID);
+GO
+
+
+--Generate 1000 movies
+;WITH N AS (
+    SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM sys.all_objects
+)
+INSERT INTO Movies (Title, GenreID, LanguageID, RegionID, CountryID, ReleaseDate, DurationMin, Description)
+SELECT
+    'Movie ' + RIGHT('0000' + CAST(n AS VARCHAR(10)),4),
+    ((n - 1) % (SELECT COUNT(*) FROM Genres)) + 1,
+    ((n - 1) % (SELECT COUNT(*) FROM Languages)) + 1,
+    ((n - 1) % (SELECT COUNT(*) FROM Regions)) + 1,
+    ((n - 1) % (SELECT COUNT(*) FROM Countries)) + 1,
+    DATEADD(DAY, -((n * 11) % 5000), CAST(DATEADD(YEAR, -((n % 30)), GETDATE()) AS DATE)),
+    80 + (n % 60),
+    'Auto-generated movie row ' + CAST(n AS VARCHAR(10))
+FROM N;
+GO
+
+
+
+--Generate 150 users
+;WITH U AS (
+    SELECT TOP (150) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_columns
+)
+INSERT INTO Users (Username, Email, PasswordHash, DisplayName)
+SELECT
+    'user' + RIGHT('000' + CAST(n AS VARCHAR(10)),3),
+    'user' + RIGHT('000' + CAST(n AS VARCHAR(10)),3) + '@example.com',
+    CONVERT(NVARCHAR(200), HASHBYTES('SHA2_256', 'Password' + CAST(n AS VARCHAR(10))), 2),
+    'User ' + CAST(n AS VARCHAR(10))
+FROM U;
+GO
+
+--Generate ~2500 ratings (random user-movie combos); avoid duplicates by using TOP and hashing
+;WITH AllPairs AS (
+    SELECT u.UserID, m.MovieID
+    FROM Users u
+    CROSS JOIN Movies m
+)
+, RandomPairs AS (
+    SELECT TOP (2500) *
+    FROM AllPairs
+    ORDER BY NEWID() 
+)
+INSERT INTO Ratings (UserID, MovieID, Rating, Review, RatedAt)
+SELECT
+    UserID,
+    MovieID,
+    (ABS(CHECKSUM(NEWID())) % 10) + 1,  -- rating 1–10
+    'Auto review ' + CAST(ROW_NUMBER() OVER(ORDER BY NEWID()) AS NVARCHAR(10)),
+    DATEADD(MINUTE, -ROW_NUMBER() OVER(ORDER BY NEWID()), SYSUTCDATETIME())
+FROM RandomPairs;
+GO
+
+
+
+--5500 site visitor records (mix of logged-in and anonymous)
+;WITH Numbers AS (
+    SELECT TOP (5500) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+    FROM master..spt_values a CROSS JOIN master..spt_values b
+)
+INSERT INTO SiteVisitors (VisitorIdentifier, UserID, VisitTime, PageVisited, Country, Region)
+SELECT
+    CASE WHEN (n % 5) = 0 THEN NULL ELSE 'sess-' + CONVERT(NVARCHAR(100), ABS(CHECKSUM(NEWID(), n))) END,
+    CASE WHEN (n % 6) = 0 THEN NULL ELSE (ABS(CHECKSUM(NEWID(), n)) % (SELECT MAX(UserID) FROM Users) + 1) END,
+    DATEADD(MINUTE, -n, SYSUTCDATETIME()),
+    CASE WHEN (n % 5) = 0 THEN '/home'
+         WHEN (n % 5) = 1 THEN '/movies'
+         WHEN (n % 5) = 2 THEN '/movie/details'
+         ELSE '/search' END,
+    CASE WHEN (n % 10) = 0 THEN 'India'
+         WHEN (n % 11) = 1 THEN 'United States'
+         WHEN (n % 11) = 2 THEN 'United Kingdom'
+         ELSE 'Unknown' END,
+    CASE WHEN (n % 6) = 0 THEN 'Asia'
+         WHEN (n % 6) = 1 THEN 'North America'
+         ELSE NULL END
+FROM Numbers;
+GO
+
+
+
+
+CREATE PROCEDURE sp_MovieCounts_By_Country_Region_Language
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        c.Name AS Country,
+        r.Name AS Region,
+        l.Name AS Language,
+        COUNT(m.MovieID) AS MovieCount
+    FROM Movies m
+    INNER JOIN Countries c ON m.CountryID = c.CountryID
+    INNER JOIN Regions r ON m.RegionID = r.RegionID
+    INNER JOIN Languages l ON m.LanguageID = l.LanguageID
+    GROUP BY c.Name, r.Name, l.Name
+    ORDER BY c.Name, r.Name, l.Name;
+END;
+GO
+
+CREATE PROCEDURE sp_Top50Movies_By_Language
+    @LanguageName NVARCHAR(100)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT TOP (50)
+        m.MovieID,
+        m.Title,
+        l.Name AS Language,
+        AVG(CAST(rat.Rating AS FLOAT)) AS AvgRating,
+        COUNT(rat.RatingID) AS RatingCount
+    FROM Movies m
+    INNER JOIN Languages l ON m.LanguageID = l.LanguageID
+    LEFT JOIN Ratings rat ON rat.MovieID = m.MovieID
+    WHERE l.Name = @LanguageName
+    GROUP BY m.MovieID, m.Title, l.Name
+    ORDER BY AvgRating DESC, RatingCount DESC, m.Title;
+END;
+GO
+
+CREATE PROCEDURE sp_MostActiveSiteVisitors
+    @TopN INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT TOP (@TopN)
+        COALESCE(sv.UserID, 0) AS UserID,
+        sv.VisitorIdentifier,
+        COUNT(*) AS TotalVisits,
+        MIN(sv.VisitTime) AS FirstVisit,
+        MAX(sv.VisitTime) AS LastVisit
+    FROM SiteVisitors sv
+    GROUP BY sv.UserID, sv.VisitorIdentifier
+    ORDER BY TotalVisits DESC, LastVisit DESC;
+END;
+GO
+
+CREATE PROCEDURE sp_Top10_HighestRated_LastMonth
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @StartDate DATE = DATEADD(MONTH, -1, CAST(GETDATE() AS DATE));
+
+    SELECT TOP (10)
+        m.MovieID,
+        m.Title,
+        m.ReleaseDate,
+        AVG(CAST(r.Rating AS FLOAT)) AS AvgRating,
+        COUNT(r.RatingID) AS RatingCount
+    FROM Movies m
+    LEFT JOIN Ratings r ON r.MovieID = m.MovieID
+    WHERE m.ReleaseDate >= @StartDate
+    GROUP BY m.MovieID, m.Title, m.ReleaseDate
+    HAVING COUNT(r.RatingID) > 0
+    ORDER BY AvgRating DESC, RatingCount DESC;
+END;
+GO
+
+CREATE PROCEDURE sp_Top3PerYear
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    ;WITH MovieAvg AS (
+        SELECT
+            m.MovieID,
+            m.Title,
+            m.ReleaseYear,
+            AVG(CAST(r.Rating AS FLOAT)) AS AvgRating,
+            COUNT(r.RatingID) AS RatingCount
+        FROM Movies m
+        LEFT JOIN Ratings r ON r.MovieID = m.MovieID
+        GROUP BY m.MovieID, m.Title, m.ReleaseYear
+        HAVING COUNT(r.RatingID) > 0
+    ), Ranked AS (
+        SELECT
+            MovieID, Title, ReleaseYear, AvgRating, RatingCount,
+            ROW_NUMBER() OVER (PARTITION BY ReleaseYear ORDER BY AvgRating DESC, RatingCount DESC) AS rn
+        FROM MovieAvg
+    )
+    SELECT MovieID, Title, ReleaseYear, AvgRating, RatingCount
+    FROM Ranked
+    WHERE rn <= 3
+    ORDER BY ReleaseYear DESC, AvgRating DESC;
+END;
+GO
+
+-- Summary
+EXEC sp_MovieCounts_By_Country_Region_Language;
+GO
+
+--Top 50 English movies
+EXEC sp_Top50Movies_By_Language @LanguageName = 'English';
+GO
+
+-- Top 10 active visitors
+EXEC sp_MostActiveSiteVisitors @TopN = 10;
+GO
+
+--Top 10 highest-rated released last month
+EXEC sp_Top10_HighestRated_LastMonth;
+GO
+
+--Top 3 per year
+EXEC sp_Top3PerYear;
+GO
+
+SELECT COUNT(*) AS MovieCount FROM Movies;      
+SELECT COUNT(*) AS UserCount FROM Users;         
+SELECT COUNT(*) AS RatingCount FROM Ratings;     
+SELECT COUNT(*) AS VisitCount FROM SiteVisitors;
+GO
+EXEC sp_Top50Movies_By_Language @LanguageName = 'English';
+SELECT COUNT(*) AS TotalMovies FROM Movies;
+SELECT TOP 10 * FROM Movies;
+SELECT COUNT(*) AS TotalRatings FROM Ratings;
+SELECT COUNT(*) AS TotalUsers FROM Users; 
+SELECT COUNT(*) AS TotalVisitors FROM SiteVisitors;
+
+DELETE FROM SiteVisitors;
+DBCC CHECKIDENT ('SiteVisitors', RESEED, 0);
